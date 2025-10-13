@@ -5,7 +5,7 @@ from typing import List, Tuple, Dict
 from collections import defaultdict
 
 import streamlit as st
-from PIL import Image, ImageOps, ImageFilter
+from PIL import Image, ImageOps, ImageFilter, ImageEnhance
 import fitz  # PyMuPDF
 
 # ===== HEIC/HEIF =====
@@ -20,44 +20,43 @@ except Exception:
 # ==========================
 # PAGE & SIDEBAR
 # ==========================
-st.set_page_config(page_title="Multi-ZIP → JPG & Kompres (Auto Size)", page_icon="📦", layout="wide")
-st.title("📦 Multi-ZIP / Files → JPG & Kompres (Auto Size by Filename)")
-st.caption("Konversi gambar (termasuk JFIF/HEIC) & PDF ke JPG. File bernama q.jpg/w.jpg/e.jpg → 200 KB, lainnya → 140 KB. Video tidak diterima.")
+st.set_page_config(page_title="Multi-ZIP → JPG & Kompres High Quality", page_icon="📦", layout="wide")
+st.title("📦 Multi-ZIP / Files → JPG & Kompres (High Quality)")
+st.caption("Konversi gambar (termasuk JFIF/HEIC) & PDF ke JPG dengan kualitas tinggi. File bernama q/w/e → 200 KB, lainnya → 140 KB.")
 
 with st.sidebar:
     st.header("⚙️ Pengaturan")
-    SPEED_PRESET = st.selectbox("Preset kecepatan", ["fast", "balanced"], index=0)
-    MIN_SIDE_PX = st.number_input("Sisi terpendek minimum (px)", 64, 2048, 256, 32)
-    SCALE_MIN = st.slider("Skala minimum saat downscale", 0.10, 0.75, 0.35, 0.05)
-    QUALITY_SAFE_MODE = st.checkbox("Mode anti-artifact (disarankan)", True)
-    UPSCALE_MAX = 1.0 if QUALITY_SAFE_MODE else st.slider("Batas upscale maksimum", 1.0, 3.0, 2.0, 0.1)
-    SHARPEN_ON_RESIZE = st.checkbox("Sharpen ringan setelah resize", True)
-    SHARPEN_AMOUNT = st.slider("Sharpen amount", 0.0, 2.0, 0.7 if QUALITY_SAFE_MODE else 1.0, 0.1)
-    PDF_DPI = 180 if SPEED_PRESET == "fast" else 220
+    SPEED_PRESET = st.selectbox("Preset kecepatan", ["balanced", "high_quality"], index=1)
+    MIN_SIDE_PX = st.number_input("Sisi terpendek minimum (px)", 64, 4096, 800, 64)
+    SCALE_MIN = st.slider("Skala minimum saat downscale", 0.30, 0.90, 0.60, 0.05)
+    UPSCALE_MAX = st.slider("Batas upscale maksimum", 1.0, 2.0, 1.0, 0.1)
+    SHARPEN_ON_RESIZE = st.checkbox("Sharpen setelah resize", True)
+    SHARPEN_AMOUNT = st.slider("Sharpen amount", 0.0, 2.0, 0.5, 0.1)
+    PDF_DPI = st.slider("PDF DPI (resolusi)", 150, 400, 300, 25)
     MASTER_ZIP_NAME = st.text_input("Nama master ZIP", "compressed.zip")
     st.markdown("**Target otomatis:**")
-    st.markdown("- File bernama **q, w, atau e** (tanpa ekstensi) → **200 KB**")
+    st.markdown("- File bernama **q, w, atau e** → **200 KB**")
     st.markdown("- File dengan nama lain → **140 KB**")
 
-# ===== Tunables =====
-MAX_QUALITY = 95
-MIN_QUALITY = 45 if QUALITY_SAFE_MODE else 15
+# ===== Tunables untuk Kualitas Tinggi =====
+MAX_QUALITY = 98  # Naikkan kualitas maksimum
+MIN_QUALITY = 75  # Jangan turun terlalu rendah (hindari blocky artifacts)
 BG_FOR_ALPHA = (255, 255, 255)
 THREADS = min(4, max(2, (os.cpu_count() or 2)))
-ZIP_COMP_ALGO = zipfile.ZIP_STORED if SPEED_PRESET == "fast" else zipfile.ZIP_DEFLATED
+ZIP_COMP_ALGO = zipfile.ZIP_DEFLATED
 
-# ✅ Target size berdasarkan folder
-TARGET_KB_HIGH = 200  # untuk folder q, w, e
-TARGET_KB_LOW = 140   # untuk folder lain
-MIN_KB_HIGH = 195     # minimum untuk folder q, w, e
-MIN_KB_LOW = 135      # minimum untuk folder lain
+# ✅ Target size berdasarkan nama file
+TARGET_KB_HIGH = 200  # untuk file q, w, e
+TARGET_KB_LOW = 140   # untuk file lain
+MIN_KB_HIGH = 195
+MIN_KB_LOW = 135
 
 IMG_EXT = {".jpg", ".jpeg", ".jfif", ".png", ".webp", ".tif", ".tiff", ".bmp", ".gif", ".heic", ".heif"}
 PDF_EXT = {".pdf"}
 ALLOW_ZIP = True
-VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".3gp", ".wmv", ".flv", ".mpg", ".mpeg"}
 
-JPEG_SUBSAMPLING = 0 if QUALITY_SAFE_MODE else 2
+# ✅ JPEG encoder settings untuk kualitas maksimal
+JPEG_SUBSAMPLING = 0  # 4:4:4 chroma subsampling (no color compression)
 JPEG_OPTIMIZE = True
 JPEG_PROGRESSIVE = True
 
@@ -70,31 +69,41 @@ def get_target_size_for_path(relpath: Path) -> Tuple[int, int]:
     Jika nama file (tanpa ekstensi) adalah tepat 'q', 'w', atau 'e' → 200 KB
     Lainnya → 140 KB
     """
-    filename_lower = relpath.stem.lower()  # stem = nama file tanpa ekstensi
+    filename_lower = relpath.stem.lower()
     if filename_lower in ['q', 'w', 'e']:
         return TARGET_KB_HIGH, MIN_KB_HIGH
     return TARGET_KB_LOW, MIN_KB_LOW
 
 # ==========================
-# Helpers (quality tuned)
+# Helpers untuk Quality Enhancement
 # ==========================
 
-def maybe_sharpen(img: Image.Image, do_it=True, amount=1.0) -> Image.Image:
-    if not do_it or amount <= 0:
+def enhance_sharpness(img: Image.Image, factor: float = 1.0) -> Image.Image:
+    """Tingkatkan ketajaman gambar dengan control lebih halus"""
+    if factor <= 0:
         return img
-    return img.filter(ImageFilter.UnsharpMask(radius=1.0, percent=int(130 * amount), threshold=2))
+    enhancer = ImageEnhance.Sharpness(img)
+    return enhancer.enhance(1.0 + (factor * 0.3))  # Subtle sharpening
 
-
-def pre_smooth_if_downscaling(img: Image.Image, scale: float) -> Image.Image:
-    if QUALITY_SAFE_MODE and scale < 1.0:
-        try:
-            return img.filter(ImageFilter.GaussianBlur(radius=0.3))
-        except Exception:
-            return img
-    return img
-
+def smart_resize(img: Image.Image, scale: float, enhance_quality: bool = True) -> Image.Image:
+    """Resize dengan algoritma terbaik dan optional enhancement"""
+    w, h = img.size
+    nw, nh = max(int(w * scale), 1), max(int(h * scale), 1)
+    
+    # Gunakan LANCZOS untuk downscale, BICUBIC untuk upscale
+    if scale < 1.0:
+        # Downscaling: gunakan LANCZOS dengan slight pre-blur untuk anti-aliasing
+        if enhance_quality:
+            img = img.filter(ImageFilter.GaussianBlur(radius=0.2))
+        resized = img.resize((nw, nh), Image.LANCZOS)
+    else:
+        # Upscaling: gunakan BICUBIC (lebih smooth dari LANCZOS)
+        resized = img.resize((nw, nh), Image.BICUBIC)
+    
+    return resized
 
 def to_rgb_flat(img: Image.Image, bg=BG_FOR_ALPHA) -> Image.Image:
+    """Convert to RGB dengan handling alpha channel"""
     if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
         base = Image.new("RGB", img.size, bg)
         base.paste(img, mask=img.convert("RGBA").split()[-1])
@@ -103,8 +112,8 @@ def to_rgb_flat(img: Image.Image, bg=BG_FOR_ALPHA) -> Image.Image:
         return img.convert("RGB")
     return img
 
-
 def save_jpg_bytes(img: Image.Image, quality: int) -> bytes:
+    """Save JPEG dengan settings optimal untuk kualitas"""
     buf = io.BytesIO()
     img.save(
         buf,
@@ -112,15 +121,16 @@ def save_jpg_bytes(img: Image.Image, quality: int) -> bytes:
         quality=int(quality),
         optimize=JPEG_OPTIMIZE,
         progressive=JPEG_PROGRESSIVE,
-        subsampling=JPEG_SUBSAMPLING,
+        subsampling=JPEG_SUBSAMPLING,  # 4:4:4 untuk detail maksimal
     )
     return buf.getvalue()
 
-
 def try_quality_bs(img: Image.Image, target_kb: int, q_min=MIN_QUALITY, q_max=MAX_QUALITY):
+    """Binary search untuk menemukan kualitas optimal"""
     lo, hi = q_min, q_max
     best_bytes = None
     best_q = None
+    
     while lo <= hi:
         mid = (lo + hi) // 2
         data = save_jpg_bytes(img, mid)
@@ -129,37 +139,29 @@ def try_quality_bs(img: Image.Image, target_kb: int, q_min=MIN_QUALITY, q_max=MA
             lo = mid + 1
         else:
             hi = mid - 1
+    
     return best_bytes, best_q
 
-
-def resize_to_scale(img: Image.Image, scale: float, do_sharpen=True, amount=1.0) -> Image.Image:
-    w, h = img.size
-    base = pre_smooth_if_downscaling(img, scale)
-    nw, nh = max(int(w * scale), 1), max(int(h * scale), 1)
-    out = base.resize((nw, nh), Image.LANCZOS)
-    return maybe_sharpen(out, do_sharpen, amount)
-
-
-def ensure_min_side(img: Image.Image, min_side_px: int, do_sharpen=True, amount=1.0) -> Image.Image:
+def ensure_min_side(img: Image.Image, min_side_px: int) -> Image.Image:
+    """Pastikan sisi terpendek minimal sekian pixel"""
     w, h = img.size
     if min(w, h) >= min_side_px:
         return img
-    scale = max(min_side_px / max(min(w, h), 1), 1.0)
-    return resize_to_scale(img, scale, do_sharpen, amount)
-
+    scale = min_side_px / min(w, h)
+    return smart_resize(img, scale, enhance_quality=True)
 
 def load_image_from_bytes(name: str, raw: bytes) -> Image.Image:
+    """Load image dengan EXIF orientation handling"""
     im = Image.open(io.BytesIO(raw))
     return ImageOps.exif_transpose(im)
 
-
 def gif_first_frame(im: Image.Image) -> Image.Image:
+    """Extract first frame dari GIF"""
     try:
         im.seek(0)
     except Exception:
         pass
     return im.convert("RGBA") if im.mode == "P" else im
-
 
 def compress_into_range(
     base_img: Image.Image,
@@ -171,82 +173,94 @@ def compress_into_range(
     do_sharpen: bool,
     sharpen_amount: float,
 ):
+    """Kompresi gambar dengan mempertahankan kualitas visual maksimal"""
     base = to_rgb_flat(base_img)
-
-    # 1) Coba tanpa resize dulu di kualitas optimal
-    data, q = try_quality_bs(base, max_kb)
-    if data is not None and (len(data) >= min_kb * 1024 or QUALITY_SAFE_MODE):
+    
+    # 1) Pastikan resolusi minimal dulu
+    base = ensure_min_side(base, min_side_px)
+    
+    # 2) Coba save dengan kualitas tinggi tanpa resize
+    data, q = try_quality_bs(base, max_kb, MIN_QUALITY, MAX_QUALITY)
+    if data is not None and len(data) >= min_kb * 1024:
+        # Sudah masuk range tanpa perlu resize
+        if do_sharpen:
+            base = enhance_sharpness(base, sharpen_amount)
+            data = save_jpg_bytes(base, q)
         return data, 1.0, q, len(data)
-
-    # 2) Kalau perlu resize untuk capai max_kb
+    
+    # 3) Jika terlalu besar, perlu downscale
     lo, hi = scale_min, 1.0
     best_pack = None
-    max_steps = 8 if SPEED_PRESET == "fast" else 12
+    max_steps = 15  # Lebih banyak iterasi untuk precision lebih tinggi
+    
     for _ in range(max_steps):
         mid = (lo + hi) / 2
-        candidate = resize_to_scale(base, mid, do_sharpen, sharpen_amount)
-        candidate = ensure_min_side(candidate, min_side_px, do_sharpen, sharpen_amount)
-        d, q2 = try_quality_bs(candidate, max_kb)
+        candidate = smart_resize(base, mid, enhance_quality=True)
+        candidate = ensure_min_side(candidate, min_side_px)
+        
+        if do_sharpen:
+            candidate = enhance_sharpness(candidate, sharpen_amount)
+        
+        d, q2 = try_quality_bs(candidate, max_kb, MIN_QUALITY, MAX_QUALITY)
+        
         if d is not None:
+            size_kb = len(d) / 1024
             best_pack = (d, mid, q2, len(d))
-            lo = mid + (hi - mid) * 0.35
+            
+            # Jika sudah masuk range yang bagus, break
+            if min_kb <= size_kb <= max_kb:
+                break
+            
+            lo = mid + (hi - mid) * 0.3
         else:
-            hi = mid - (mid - lo) * 0.35
-        if hi - lo < 1e-3:
+            hi = mid - (mid - lo) * 0.3
+        
+        if hi - lo < 0.005:  # Precision threshold
             break
-
+    
     if best_pack is None:
-        smallest = resize_to_scale(base, scale_min, do_sharpen, sharpen_amount)
-        smallest = ensure_min_side(smallest, min_side_px, do_sharpen, sharpen_amount)
+        # Fallback: gunakan scale minimum
+        smallest = smart_resize(base, scale_min, enhance_quality=True)
+        smallest = ensure_min_side(smallest, min_side_px)
+        if do_sharpen:
+            smallest = enhance_sharpness(smallest, sharpen_amount)
         d = save_jpg_bytes(smallest, MIN_QUALITY)
-        result = (d, scale_min, MIN_QUALITY, len(d))
-    else:
-        result = best_pack
-
-    data, scale_used, q_used, size_b = result
-
-    # 3) (Opsional) Jika masih di bawah min_kb
-    if size_b < min_kb * 1024 and not QUALITY_SAFE_MODE:
-        img_now = resize_to_scale(base, scale_used, do_sharpen, sharpen_amount)
-        img_now = ensure_min_side(img_now, min_side_px, do_sharpen, sharpen_amount)
+        return (d, scale_min, MIN_QUALITY, len(d))
+    
+    data, scale_used, q_used, size_b = best_pack
+    
+    # 4) Jika masih di bawah min_kb, coba tingkatkan kualitas
+    if size_b < min_kb * 1024:
+        img_now = smart_resize(base, scale_used, enhance_quality=True)
+        img_now = ensure_min_side(img_now, min_side_px)
+        if do_sharpen:
+            img_now = enhance_sharpness(img_now, sharpen_amount)
+        
+        # Coba dengan kualitas lebih tinggi
         d, q2 = try_quality_bs(img_now, max_kb, max(q_used, MIN_QUALITY), MAX_QUALITY)
-        if d is not None and len(d) > size_b:
+        if d is not None and len(d) > size_b and len(d) <= max_kb * 1024:
             data, q_used, size_b = d, q2, len(d)
-        cur_scale = scale_used
-        iters = 0
-        max_iters = 6 if SPEED_PRESET == "fast" else 12
-        while size_b < min_kb * 1024 and cur_scale < upscale_max and iters < max_iters:
-            cur_scale = min(cur_scale * 1.2, upscale_max)
-            candidate = resize_to_scale(base, cur_scale, do_sharpen, sharpen_amount)
-            candidate = ensure_min_side(candidate, min_side_px, do_sharpen, sharpen_amount)
-            d, q3 = try_quality_bs(candidate, max_kb, MIN_QUALITY, MAX_QUALITY)
-            if d is None:
-                cur_scale *= 0.95
-                iters += 1
-                continue
-            if len(d) > size_b:
-                data, q_used, size_b, scale_used = d, q3, len(d), cur_scale
-            iters += 1
-
+    
     return data, scale_used, q_used, size_b
 
-
 def pdf_bytes_to_images(pdf_bytes: bytes, dpi: int) -> List[Image.Image]:
+    """Convert PDF ke images dengan resolusi tinggi"""
     images = []
     with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
         for page in doc:
             rect = page.rect
             long_inch = max(rect.width, rect.height) / 72.0
-            target_long_px = 2400 if QUALITY_SAFE_MODE else 2000
-            dpi_eff = int(min(max(dpi, 72), max(72, target_long_px / max(long_inch, 1e-6))))
+            # Target pixel yang lebih tinggi untuk detail maksimal
+            target_long_px = 3000
+            dpi_eff = int(min(max(dpi, 150), max(150, target_long_px / max(long_inch, 1e-6))))
             mat = fitz.Matrix(dpi_eff / 72.0, dpi_eff / 72.0)
             pix = page.get_pixmap(matrix=mat, alpha=False)
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             images.append(ImageOps.exif_transpose(img))
     return images
 
-
 def extract_zip_to_memory(zf_bytes: bytes) -> List[Tuple[Path, bytes]]:
+    """Extract ZIP ke memory"""
     out = []
     with zipfile.ZipFile(io.BytesIO(zf_bytes), 'r') as zf:
         for info in zf.infolist():
@@ -257,19 +271,19 @@ def extract_zip_to_memory(zf_bytes: bytes) -> List[Tuple[Path, bytes]]:
             out.append((Path(info.filename), data))
     return out
 
-
 def guess_base_name_from_zip(zipname: str) -> str:
+    """Extract base name dari ZIP filename"""
     base = Path(zipname).stem
     return base or "output"
 
-
 def process_one_file_entry(relpath: Path, raw_bytes: bytes, input_root_label: str):
+    """Process satu file (gambar atau PDF)"""
     processed: List[Tuple[str, int, float, int, bool, int, int]] = []
     outputs: Dict[str, bytes] = {}
     skipped: List[Tuple[str, str]] = []
     ext = relpath.suffix.lower()
     
-    # ✅ Tentukan target size berdasarkan folder
+    # Tentukan target size berdasarkan nama file
     target_kb, min_kb = get_target_size_for_path(relpath)
     
     try:
@@ -323,7 +337,7 @@ st.subheader("1) Upload ZIP atau File Lepas")
 allowed_exts_for_uploader = sorted({e.lstrip('.') for e in IMG_EXT.union(PDF_EXT)} | ({"zip"} if ALLOW_ZIP else set()))
 
 uploaded_files = st.file_uploader(
-    "Upload beberapa ZIP (berisi folder/gambar/PDF) dan/atau file lepas (gambar/PDF). Video ditolak otomatis.",
+    "Upload beberapa ZIP (berisi folder/gambar/PDF) dan/atau file lepas (gambar/PDF).",
     type=allowed_exts_for_uploader,
     accept_multiple_files=True,
 )
@@ -437,7 +451,7 @@ if run:
                 if shown >= MAX_ROWS_PER_JOB:
                     break
                 kb = size_b / 1024
-                flag = "✅" if in_range else ("ℹ️" if (QUALITY_SAFE_MODE and kb < min_kb) else ("🔼" if kb < min_kb else "⚠️"))
+                flag = "✅" if in_range else ("🔼" if kb < min_kb else "⚠️")
                 st.write(f"{flag} {name} → **{kb:.1f} KB** (target: {min_kb}-{target_kb} KB) | scale≈{scale:.3f} | quality={q}")
                 ok += 1 if in_range else 0
                 shown += 1
@@ -464,4 +478,4 @@ if run:
         mime="application/zip",
     )
 
-    st.success("Selesai! Master ZIP siap diunduh dengan target size berbeda (q/w/e=200KB, lainnya=140KB).")
+    st.success("Selesai! Master ZIP siap diunduh dengan kualitas tinggi (q/w/e=200KB, lainnya=140KB).")
