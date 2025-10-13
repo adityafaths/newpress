@@ -39,13 +39,13 @@ with st.sidebar:
     st.markdown("- File dengan nama lain → **140 KB**")
 
 # ===== Tunables untuk Kualitas Tinggi =====
-MAX_QUALITY = 98  # Naikkan kualitas maksimum
-MIN_QUALITY = 75  # Jangan turun terlalu rendah (hindari blocky artifacts)
+MAX_QUALITY = 95  # Kualitas maksimum
+MIN_QUALITY = 60  # Minimum quality untuk menjaga detail
 BG_FOR_ALPHA = (255, 255, 255)
 THREADS = min(4, max(2, (os.cpu_count() or 2)))
 ZIP_COMP_ALGO = zipfile.ZIP_DEFLATED
 
-# ✅ Target size berdasarkan nama file
+# ✅ Target size berdasarkan nama file (lebih ketat)
 TARGET_KB_HIGH = 200  # untuk file q, w, e
 TARGET_KB_LOW = 140   # untuk file lain
 MIN_KB_HIGH = 195
