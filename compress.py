@@ -29,14 +29,13 @@ with st.sidebar:
     SPEED_PRESET = st.selectbox("Preset kecepatan", ["fast", "balanced"], index=0)
     MIN_SIDE_PX = st.number_input("Sisi terpendek minimum (px)", 64, 2048, 256, 32)
     SCALE_MIN = st.slider("Skala minimum saat downscale", 0.10, 0.75, 0.35, 0.05)
-    UPSCALE_MAX = st.slider("Batas upscale maksimum", 1.0, 3.0, 2.0, 0.1)
     SHARPEN_ON_RESIZE = st.checkbox("Sharpen ringan setelah resize", True)
     SHARPEN_AMOUNT = st.slider("Sharpen amount", 0.0, 2.0, 1.0, 0.1)
     PDF_DPI = 150 if SPEED_PRESET == "fast" else 200
     MASTER_ZIP_NAME = st.text_input("Nama master ZIP", "compressed.zip")
     st.markdown("**Target otomatis:**")
-    st.markdown("- File **q, w, e** → **200 KB**")
-    st.markdown("- File lainnya → **100 KB**")
+    st.markdown("- File **q, w, e** → **≤200 KB**")
+    st.markdown("- File lainnya → **≤100 KB**")
 
 # ===== Tunables =====
 MAX_QUALITY = 95
@@ -48,8 +47,6 @@ ZIP_COMP_ALGO = zipfile.ZIP_STORED if SPEED_PRESET == "fast" else zipfile.ZIP_DE
 # ✅ Target size berdasarkan nama file
 TARGET_KB_HIGH = 200  # untuk q, w, e
 TARGET_KB_LOW = 100   # untuk lainnya
-MIN_KB_HIGH = 195     # minimum untuk q, w, e
-MIN_KB_LOW = 95       # minimum untuk lainnya
 
 IMG_EXT = {".jpg", ".jpeg", ".jfif", ".png", ".webp", ".tif", ".tiff", ".bmp", ".gif", ".heic", ".heif"}
 PDF_EXT = {".pdf"}
@@ -59,16 +56,16 @@ VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".3gp", ".wmv", ".
 # ==========================
 # Helper: Deteksi target size berdasarkan nama file
 # ==========================
-def get_target_size_for_path(relpath: Path) -> Tuple[int, int]:
+def get_target_size_for_path(relpath: Path) -> int:
     """
-    Mengembalikan (TARGET_KB, MIN_KB) berdasarkan nama file.
-    Jika nama file (tanpa ekstensi) adalah tepat 'q', 'w', atau 'e' → 200 KB (min 195)
-    Lainnya → 100 KB (min 95)
+    Mengembalikan TARGET_KB berdasarkan nama file.
+    Jika nama file (tanpa ekstensi) adalah tepat 'q', 'w', atau 'e' → 200 KB
+    Lainnya → 100 KB
     """
     filename_lower = relpath.stem.lower()
     if filename_lower in ['q', 'w', 'e']:
-        return TARGET_KB_HIGH, MIN_KB_HIGH
-    return TARGET_KB_LOW, MIN_KB_LOW
+        return TARGET_KB_HIGH
+    return TARGET_KB_LOW
 
 # ==========================
 # Helpers (quality tuned)
@@ -133,7 +130,7 @@ def gif_first_frame(im: Image.Image) -> Image.Image:
         pass
     return im.convert("RGBA") if im.mode == "P" else im
 
-def compress_into_range(base_img: Image.Image, min_kb: int, max_kb: int, min_side_px: int, scale_min: float, upscale_max: float, do_sharpen: bool, sharpen_amount: float):
+def compress_into_range(base_img: Image.Image, max_kb: int, min_side_px: int, scale_min: float, do_sharpen: bool, sharpen_amount: float):
     base = to_rgb_flat(base_img)
     
     # 1) Coba tanpa resize dulu
@@ -168,39 +165,19 @@ def compress_into_range(base_img: Image.Image, min_kb: int, max_kb: int, min_sid
     
     data, scale_used, q_used, size_b = result
     
-    # ✅ VALIDASI KETAT: Jika masih di atas max_kb, paksa turunkan
+    # ✅ FINAL CHECK: Pastikan tidak ada yang lolos di atas max_kb
     if size_b > max_kb * 1024:
-        for try_scale in [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, scale_min]:
-            candidate = resize_to_scale(base, try_scale, do_sharpen, sharpen_amount)
-            candidate = ensure_min_side(candidate, min_side_px, do_sharpen, sharpen_amount)
-            d, q2 = try_quality_bs(candidate, max_kb)
-            if d is not None and len(d) <= max_kb * 1024:
-                data, scale_used, q_used, size_b = d, try_scale, q2, len(d)
+        # Fallback terakhir: turunkan quality secara paksa
+        for q_try in range(q_used - 5, MIN_QUALITY - 1, -5):
+            if q_try < MIN_QUALITY:
+                q_try = MIN_QUALITY
+            img_final = resize_to_scale(base, scale_used, do_sharpen, sharpen_amount)
+            img_final = ensure_min_side(img_final, min_side_px, do_sharpen, sharpen_amount)
+            d = save_jpg_bytes(img_final, q_try)
+            if len(d) <= max_kb * 1024:
+                return d, scale_used, q_try, len(d)
+            if q_try == MIN_QUALITY:
                 break
-    
-    # 3) Upscale jika masih di bawah min_kb
-    if size_b < min_kb * 1024:
-        img_now = resize_to_scale(base, scale_used, do_sharpen, sharpen_amount)
-        img_now = ensure_min_side(img_now, min_side_px, do_sharpen, sharpen_amount)
-        d, q2 = try_quality_bs(img_now, max_kb, max(q_used, MIN_QUALITY), MAX_QUALITY)
-        if d is not None and len(d) > size_b:
-            data, q_used, size_b = d, q2, len(d)
-        
-        cur_scale = scale_used
-        iters = 0
-        max_iters = 6 if SPEED_PRESET == "fast" else 12
-        while size_b < min_kb * 1024 and cur_scale < upscale_max and iters < max_iters:
-            cur_scale = min(cur_scale * 1.2, upscale_max)
-            candidate = resize_to_scale(base, cur_scale, do_sharpen, sharpen_amount)
-            candidate = ensure_min_side(candidate, min_side_px, do_sharpen, sharpen_amount)
-            d, q3 = try_quality_bs(candidate, max_kb, MIN_QUALITY, MAX_QUALITY)
-            if d is None:
-                cur_scale *= 0.95
-                iters += 1
-                continue
-            if len(d) > size_b:
-                data, q_used, size_b, scale_used = d, q3, len(d), cur_scale
-            iters += 1
     
     return data, scale_used, q_used, size_b
 
@@ -235,13 +212,13 @@ def guess_base_name_from_zip(zipname: str) -> str:
     return base or "output"
 
 def process_one_file_entry(relpath: Path, raw_bytes: bytes, input_root_label: str):
-    processed: List[Tuple[str, int, float, int, bool, int, int]] = []
+    processed: List[Tuple[str, int, float, int, bool, int]] = []
     outputs: Dict[str, bytes] = {}
     skipped: List[Tuple[str, str]] = []
     ext = relpath.suffix.lower()
     
     # ✅ Tentukan target size berdasarkan nama file
-    target_kb, min_kb = get_target_size_for_path(relpath)
+    target_kb = get_target_size_for_path(relpath)
     
     try:
         if ext in PDF_EXT:
@@ -249,11 +226,11 @@ def process_one_file_entry(relpath: Path, raw_bytes: bytes, input_root_label: st
             for idx, pil_img in enumerate(pages, start=1):
                 try:
                     data, scale, q, size_b = compress_into_range(
-                        pil_img, min_kb, target_kb, MIN_SIDE_PX, SCALE_MIN, UPSCALE_MAX, SHARPEN_ON_RESIZE, SHARPEN_AMOUNT
+                        pil_img, target_kb, MIN_SIDE_PX, SCALE_MIN, SHARPEN_ON_RESIZE, SHARPEN_AMOUNT
                     )
                     out_rel = relpath.with_suffix("").as_posix() + f"_p{idx}.jpg"
                     outputs[out_rel] = data
-                    processed.append((out_rel, size_b, scale, q, min_kb*1024 <= size_b <= target_kb*1024, target_kb, min_kb))
+                    processed.append((out_rel, size_b, scale, q, size_b <= target_kb*1024, target_kb))
                 except Exception as e:
                     skipped.append((f"{relpath} (page {idx})", str(e)))
         elif ext in IMG_EXT and (ext not in {".heic", ".heif"} or HEIF_OK):
@@ -261,11 +238,11 @@ def process_one_file_entry(relpath: Path, raw_bytes: bytes, input_root_label: st
             if ext == ".gif":
                 im = gif_first_frame(im)
             data, scale, q, size_b = compress_into_range(
-                im, min_kb, target_kb, MIN_SIDE_PX, SCALE_MIN, UPSCALE_MAX, SHARPEN_ON_RESIZE, SHARPEN_AMOUNT
+                im, target_kb, MIN_SIDE_PX, SCALE_MIN, SHARPEN_ON_RESIZE, SHARPEN_AMOUNT
             )
             out_rel = relpath.with_suffix(".jpg").as_posix()
             outputs[out_rel] = data
-            processed.append((out_rel, size_b, scale, q, min_kb*1024 <= size_b <= target_kb*1024, target_kb, min_kb))
+            processed.append((out_rel, size_b, scale, q, size_b <= target_kb*1024, target_kb))
         elif ext in {".heic", ".heif"} and not HEIF_OK:
             skipped.append((str(relpath), "Butuh pillow-heif (tidak tersedia)"))
     except Exception as e:
@@ -337,7 +314,7 @@ if run:
 
     st.write(f"🔧 Ditemukan **{sum(len(j['items']) for j in jobs)}** berkas dari **{len(jobs)}** input.")
 
-    summary: Dict[str, List[Tuple[str, int, float, int, bool, int, int]]] = defaultdict(list)
+    summary: Dict[str, List[Tuple[str, int, float, int, bool, int]]] = defaultdict(list)
     skipped_all: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
 
     master_buf = io.BytesIO()
@@ -390,12 +367,12 @@ if run:
         with st.expander(f"📦 {base} — {len(items)} file diproses, {len(skipped)} dilewati/errored"):
             ok = 0
             shown = 0
-            for name, size_b, scale, q, in_range, target_kb, min_kb in items:
+            for name, size_b, scale, q, in_range, target_kb in items:
                 if shown >= MAX_ROWS_PER_JOB:
                     break
                 kb = size_b / 1024
-                flag = "✅" if in_range else ("🔼" if kb < min_kb else "⚠️")
-                st.write(f"{flag} `{name}` → **{kb:.1f} KB** (target: {min_kb}-{target_kb} KB) | scale≈{scale:.3f} | quality={q}")
+                flag = "✅" if in_range else "⚠️"
+                st.write(f"{flag} `{name}` → **{kb:.1f} KB** (target: ≤{target_kb} KB) | scale≈{scale:.3f} | quality={q}")
                 ok += 1 if in_range else 0
                 shown += 1
             extra = len(items) - shown
@@ -407,12 +384,12 @@ if run:
                 for n, reason in skipped[:50]:
                     st.write(f"- {n}: {reason}")
 
-            st.caption(f"Berhasil di rentang target: **{ok}/{len(items)}**")
+            st.caption(f"Berhasil di bawah target: **{ok}/{len(items)}**")
             grand_ok += ok
             grand_cnt += len(items)
 
     st.write("---")
-    st.write(f"**Total file OK di rentang:** {grand_ok}/{grand_cnt}")
+    st.write(f"**Total file OK di bawah target:** {grand_ok}/{grand_cnt}")
 
     st.download_button(
         "⬇️ Download Master ZIP",
@@ -421,4 +398,4 @@ if run:
         mime="application/zip",
     )
 
-    st.success("Selesai! Master ZIP siap diunduh (q/w/e=195-200KB, lainnya=95-100KB).")
+    st.success("Selesai! Master ZIP siap diunduh (q/w/e ≤200KB, lainnya ≤100KB).")
