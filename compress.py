@@ -138,10 +138,10 @@ def compress_into_range(base_img: Image.Image, min_kb: int, max_kb: int, min_sid
     
     # 1) Coba tanpa resize dulu
     data, q = try_quality_bs(base, max_kb)
-    if data is not None:
+    if data is not None and len(data) <= max_kb * 1024:
         result = (data, 1.0, q, len(data))
     else:
-        # 2) Binary search untuk scale yang tepat
+        # 2) Binary search untuk scale yang tepat - PAKSA di bawah max_kb
         lo, hi = scale_min, 1.0
         best_pack = None
         max_steps = 8 if SPEED_PRESET == "fast" else 12
@@ -150,7 +150,7 @@ def compress_into_range(base_img: Image.Image, min_kb: int, max_kb: int, min_sid
             candidate = resize_to_scale(base, mid, do_sharpen, sharpen_amount)
             candidate = ensure_min_side(candidate, min_side_px, do_sharpen, sharpen_amount)
             d, q2 = try_quality_bs(candidate, max_kb)
-            if d is not None:
+            if d is not None and len(d) <= max_kb * 1024:
                 best_pack = (d, mid, q2, len(d))
                 lo = mid + (hi - mid) * 0.35
             else:
@@ -167,6 +167,16 @@ def compress_into_range(base_img: Image.Image, min_kb: int, max_kb: int, min_sid
             result = best_pack
     
     data, scale_used, q_used, size_b = result
+    
+    # ✅ VALIDASI KETAT: Jika masih di atas max_kb, paksa turunkan
+    if size_b > max_kb * 1024:
+        for try_scale in [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, scale_min]:
+            candidate = resize_to_scale(base, try_scale, do_sharpen, sharpen_amount)
+            candidate = ensure_min_side(candidate, min_side_px, do_sharpen, sharpen_amount)
+            d, q2 = try_quality_bs(candidate, max_kb)
+            if d is not None and len(d) <= max_kb * 1024:
+                data, scale_used, q_used, size_b = d, try_scale, q2, len(d)
+                break
     
     # 3) Upscale jika masih di bawah min_kb
     if size_b < min_kb * 1024:
