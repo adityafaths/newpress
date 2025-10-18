@@ -167,7 +167,7 @@ def compress_into_range(base_img: Image.Image, max_kb: int, min_side_px: int, sc
     
     # ✅ FINAL CHECK: Pastikan tidak ada yang lolos di atas max_kb
     if size_b > max_kb * 1024:
-        # Fallback terakhir: turunkan quality secara paksa
+        # Step 1: Turunkan quality
         for q_try in range(q_used - 5, MIN_QUALITY - 1, -5):
             if q_try < MIN_QUALITY:
                 q_try = MIN_QUALITY
@@ -175,9 +175,31 @@ def compress_into_range(base_img: Image.Image, max_kb: int, min_side_px: int, sc
             img_final = ensure_min_side(img_final, min_side_px, do_sharpen, sharpen_amount)
             d = save_jpg_bytes(img_final, q_try)
             if len(d) <= max_kb * 1024:
-                return d, scale_used, q_try, len(d)
+                data, scale_used, q_used, size_b = d, scale_used, q_try, len(d)
+                break
             if q_try == MIN_QUALITY:
                 break
+    
+    # ✅ DOUBLE COMPRESS: Jika MASIH lolos, compress 2x
+    if size_b > max_kb * 1024:
+        # Load hasil compress pertama, lalu compress lagi
+        try:
+            img_recompress = Image.open(io.BytesIO(data))
+            img_recompress = ImageOps.exif_transpose(img_recompress)
+            
+            # Turunkan scale lebih agresif untuk compress ke-2
+            for scale_try in [0.95, 0.9, 0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5]:
+                candidate = resize_to_scale(img_recompress, scale_try, do_sharpen, sharpen_amount)
+                d, q2 = try_quality_bs(candidate, max_kb)
+                if d is not None and len(d) <= max_kb * 1024:
+                    return d, scale_used * scale_try, q2, len(d)
+            
+            # Ultimate fallback: paksa dengan quality terendah
+            smallest = resize_to_scale(img_recompress, 0.5, do_sharpen, sharpen_amount)
+            d = save_jpg_bytes(smallest, MIN_QUALITY)
+            return d, scale_used * 0.5, MIN_QUALITY, len(d)
+        except Exception:
+            pass
     
     return data, scale_used, q_used, size_b
 
