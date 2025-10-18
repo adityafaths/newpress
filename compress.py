@@ -46,7 +46,7 @@ ZIP_COMP_ALGO = zipfile.ZIP_STORED if SPEED_PRESET == "fast" else zipfile.ZIP_DE
 
 # ✅ Target size berdasarkan nama file
 TARGET_KB_HIGH = 200  # untuk q, w, e
-TARGET_KB_LOW = 100   # untuk lainnya
+TARGET_KB_LOW = 120   # untuk lainnya
 
 IMG_EXT = {".jpg", ".jpeg", ".jfif", ".png", ".webp", ".tif", ".tiff", ".bmp", ".gif", ".heic", ".heif"}
 PDF_EXT = {".pdf"}
