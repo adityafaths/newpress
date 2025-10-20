@@ -1,75 +1,4 @@
-def compress_into_range(base_img: Image.Image, max_kb: int, min_side_px: int, scale_min: float, do_sharpen: bool, sharpen_amount: float):
-    base = to_rgb_flat(base_img)
-    
-    # 1) Coba tanpa resize dulu
-    data, q = try_quality_bs(base, max_kb)
-    if data is not None and len(data) <= max_kb * 1024:
-        result = (data, 1.0, q, len(data))
-    else:
-        # 2) Binary search untuk scale yang tepat - PAKSA di bawah max_kb
-        lo, hi = scale_min, 1.0
-        best_pack = None
-        max_steps = 8 if SPEED_PRESET == "fast" else 12
-        for _ in range(max_steps):
-            mid = (lo + hi) / 2
-            candidate = resize_to_scale(base, mid, do_sharpen, sharpen_amount)
-            candidate = ensure_min_side(candidate, min_side_px, do_sharpen, sharpen_amount)
-            d, q2 = try_quality_bs(candidate, max_kb)
-            if d is not None and len(d) <= max_kb * 1024:
-                best_pack = (d, mid, q2, len(d))
-                lo = mid + (hi - mid) * 0.35
-            else:
-                hi = mid - (mid - lo) * 0.35
-            if hi - lo < 1e-3:
-                break
-        
-        if best_pack is None:
-            smallest = resize_to_scale(base, scale_min, do_sharpen, sharpen_amount)
-            smallest = ensure_min_side(smallest, min_side_px, do_sharpen, sharpen_amount)
-            d = save_jpg_bytes(smallest, MIN_QUALITY)
-            result = (d, scale_min, MIN_QUALITY, len(d))
-        else:
-            result = best_pack
-    
-    data, scale_used, q_used, size_b = result
-    
-    # ✅ FINAL CHECK: Pastikan tidak ada yang lolos di atas max_kb
-    if size_b > max_kb * 1024:
-        # Step 1: Turunkan quality
-        for q_try in range(q_used - 5, MIN_QUALITY - 1, -5):
-            if q_try < MIN_QUALITY:
-                q_try = MIN_QUALITY
-            img_final = resize_to_scale(base, scale_used, do_sharpen, sharpen_amount)
-            img_final = ensure_min_side(img_final, min_side_px, do_sharpen, sharpen_amount)
-            d = save_jpg_bytes(img_final, q_try)
-            if len(d) <= max_kb * 1024:
-                data, scale_used, q_used, size_b = d, scale_used, q_try, len(d)
-                break
-            if q_try == MIN_QUALITY:
-                break
-    
-    # ✅ DOUBLE COMPRESS: Jika MASIH lolos, compress 2x
-    if size_b > max_kb * 1024:
-        # Load hasil compress pertama, lalu compress lagi
-        try:
-            img_recompress = Image.open(io.BytesIO(data))
-            img_recompress = ImageOps.exif_transpose(img_recompress)
-            
-            # Turunkan scale lebih agresif untuk compress ke-2
-            for scale_try in [0.95, 0.9, 0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5]:
-                candidate = resize_to_scale(img_recompress, scale_try, do_sharpen, sharpen_amount)
-                d, q2 = try_quality_bs(candidate, max_kb)
-                if d is not None and len(d) <= max_kb * 1024:
-                    return d, scale_used * scale_try, q2, len(d)
-            
-            # Ultimate fallback: paksa dengan quality terendah
-            smallest = resize_to_scale(img_recompress, 0.5, do_sharpen, sharpen_amount)
-            d = save_jpg_bytes(smallest, MIN_QUALITY)
-            return d, scale_used * 0.5, MIN_QUALITY, len(d)
-        except Exception:
-            pass
-    
-    return data, scale_used, q_used, size_bimport io, os, zipfile, time, threading
+import io, os, zipfile, time, threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Tuple, Dict
@@ -93,7 +22,7 @@ except Exception:
 # ==========================
 st.set_page_config(page_title="Multi-ZIP → JPG & Kompres (Auto Size)", page_icon="📦", layout="wide")
 st.title("📦 Multi-ZIP / Files → JPG & Kompres (Auto Size by Folder)")
-st.caption("Konversi gambar (termasuk JFIF/HEIC) & PDF ke JPG. File q/w/e → 200 KB, lainnya → 100 KB. Video tidak diterima.")
+st.caption("Konversi gambar (termasuk JFIF/HEIC) & PDF ke JPG. File q/w/e → 198 KB, lainnya → 138 KB. Video tidak diterima.")
 
 with st.sidebar:
     st.header("⚙️ Pengaturan")
@@ -253,29 +182,19 @@ def compress_into_range(base_img: Image.Image, max_kb: int, min_side_px: int, sc
     
     # ✅ DOUBLE COMPRESS: Jika MASIH lolos, compress 2x
     if size_b > max_kb * 1024:
-        # Load hasil compress pertama, lalu compress lagi
         try:
             img_recompress = Image.open(io.BytesIO(data))
             img_recompress = ImageOps.exif_transpose(img_recompress)
             
-            # Turunkan scale LEBIH AGRESIF untuk compress ke-2
-            for scale_try in [0.95, 0.92, 0.9, 0.87, 0.85, 0.82, 0.8, 0.77, 0.75, 0.72, 0.7, 0.67, 0.65, 0.62, 0.6, 0.57, 0.55, 0.52, 0.5, 0.47, 0.45]:
+            for scale_try in [0.95, 0.9, 0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5]:
                 candidate = resize_to_scale(img_recompress, scale_try, do_sharpen, sharpen_amount)
                 d, q2 = try_quality_bs(candidate, max_kb)
                 if d is not None and len(d) <= max_kb * 1024:
                     return d, scale_used * scale_try, q2, len(d)
             
-            # Ultimate fallback: paksa dengan quality terendah + scale sangat kecil
-            for final_scale in [0.45, 0.4, 0.35, 0.3]:
-                smallest = resize_to_scale(img_recompress, final_scale, do_sharpen, sharpen_amount)
-                d = save_jpg_bytes(smallest, MIN_QUALITY)
-                if len(d) <= max_kb * 1024:
-                    return d, scale_used * final_scale, MIN_QUALITY, len(d)
-            
-            # SUPER ULTIMATE fallback
-            smallest = resize_to_scale(img_recompress, 0.3, do_sharpen, sharpen_amount)
+            smallest = resize_to_scale(img_recompress, 0.5, do_sharpen, sharpen_amount)
             d = save_jpg_bytes(smallest, MIN_QUALITY)
-            return d, scale_used * 0.3, MIN_QUALITY, len(d)
+            return d, scale_used * 0.5, MIN_QUALITY, len(d)
         except Exception:
             pass
     
@@ -317,7 +236,6 @@ def process_one_file_entry(relpath: Path, raw_bytes: bytes, input_root_label: st
     skipped: List[Tuple[str, str]] = []
     ext = relpath.suffix.lower()
     
-    # ✅ Tentukan target size berdasarkan nama file
     target_kb = get_target_size_for_path(relpath)
     
     try:
@@ -452,9 +370,6 @@ if run:
 
     master_buf.seek(0)
 
-    # ==========================
-    # Ringkasan
-    # ==========================
     st.subheader("📊 Ringkasan")
     grand_ok = 0
     grand_cnt = 0
