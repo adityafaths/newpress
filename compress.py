@@ -45,8 +45,8 @@ THREADS = min(4, max(2, (os.cpu_count() or 2)))
 ZIP_COMP_ALGO = zipfile.ZIP_STORED if SPEED_PRESET == "fast" else zipfile.ZIP_DEFLATED
 
 # ✅ Target size berdasarkan nama file
-TARGET_KB_HIGH = 200  # untuk q, w, e
-TARGET_KB_LOW = 110   # untuk lainnya
+TARGET_KB_HIGH = 198  # untuk q, w, e
+TARGET_KB_LOW = 138   # untuk lainnya
 
 IMG_EXT = {".jpg", ".jpeg", ".jfif", ".png", ".webp", ".tif", ".tiff", ".bmp", ".gif", ".heic", ".heif"}
 PDF_EXT = {".pdf"}
