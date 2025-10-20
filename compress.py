@@ -1,4 +1,42 @@
-import io, os, zipfile, time, threading
+def compress_into_range(base_img: Image.Image, max_kb: int, min_side_px: int, scale_min: float, do_sharpen: bool, sharpen_amount: float):
+    base = to_rgb_flat(base_img)
+    
+    # 1) Coba tanpa resize dulu - HARUS validasi
+    data, q = try_quality_bs(base, max_kb)
+    if data is not None and len(data) <= max_kb * 1024:
+        return data, 1.0, q, len(data)
+    
+    # 2) Binary search untuk scale yang tepat
+    lo, hi = scale_min, 1.0
+    best_pack = None
+    max_steps = 8 if SPEED_PRESET == "fast" else 12
+    for _ in range(max_steps):
+        mid = (lo + hi) / 2
+        candidate = resize_to_scale(base, mid, do_sharpen, sharpen_amount)
+        candidate = ensure_min_side(candidate, min_side_px, do_sharpen, sharpen_amount)
+        d, q2 = try_quality_bs(candidate, max_kb)
+        if d is not None and len(d) <= max_kb * 1024:
+            best_pack = (d, mid, q2, len(d))
+            lo = mid + (hi - mid) * 0.35
+        else:
+            hi = mid - (mid - lo) * 0.35
+        if hi - lo < 1e-3:
+            break
+    
+    if best_pack is None:
+        smallest = resize_to_scale(base, scale_min, do_sharpen, sharpen_amount)
+        smallest = ensure_min_side(smallest, min_side_px, do_sharpen, sharpen_amount)
+        d = save_jpg_bytes(smallest, MIN_QUALITY)
+        best_pack = (d, scale_min, MIN_QUALITY, len(d))
+    
+    data, scale_used, q_used, size_b = best_pack
+    
+    # 3) Jika lolos, PAKSA turun quality dulu
+    if size_b > max_kb * 1024:
+        for q_try in range(q_used - 5, MIN_QUALITY - 1, -5):
+            if q_try < MIN_QUALITY:
+                q_try = MIN_QUALITY
+            img_final = resize_to_scale(base, scale_used, do_sharimport io, os, zipfile, time, threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Tuple, Dict
@@ -34,8 +72,8 @@ with st.sidebar:
     PDF_DPI = 150 if SPEED_PRESET == "fast" else 200
     MASTER_ZIP_NAME = st.text_input("Nama master ZIP", "compressed.zip")
     st.markdown("**Target otomatis:**")
-    st.markdown("- File **q, w, e** → **≤200 KB**")
-    st.markdown("- File lainnya → **≤110 KB**")
+    st.markdown("- File **q, w, e** → **≤198 KB**")
+    st.markdown("- File lainnya → **≤138 KB**")
 
 # ===== Tunables =====
 MAX_QUALITY = 95
@@ -59,8 +97,8 @@ VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".3gp", ".wmv", ".
 def get_target_size_for_path(relpath: Path) -> int:
     """
     Mengembalikan TARGET_KB berdasarkan nama file.
-    Jika nama file (tanpa ekstensi) adalah tepat 'q', 'w', atau 'e' → 200 KB
-    Lainnya → 110 KB
+    Jika nama file (tanpa ekstensi) adalah tepat 'q', 'w', atau 'e' → 198 KB
+    Lainnya → 138 KB
     """
     filename_lower = relpath.stem.lower()
     if filename_lower in ['q', 'w', 'e']:
@@ -187,17 +225,24 @@ def compress_into_range(base_img: Image.Image, max_kb: int, min_side_px: int, sc
             img_recompress = Image.open(io.BytesIO(data))
             img_recompress = ImageOps.exif_transpose(img_recompress)
             
-            # Turunkan scale lebih agresif untuk compress ke-2
-            for scale_try in [0.95, 0.9, 0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5]:
+            # Turunkan scale LEBIH AGRESIF untuk compress ke-2
+            for scale_try in [0.95, 0.92, 0.9, 0.87, 0.85, 0.82, 0.8, 0.77, 0.75, 0.72, 0.7, 0.67, 0.65, 0.62, 0.6, 0.57, 0.55, 0.52, 0.5, 0.47, 0.45]:
                 candidate = resize_to_scale(img_recompress, scale_try, do_sharpen, sharpen_amount)
                 d, q2 = try_quality_bs(candidate, max_kb)
                 if d is not None and len(d) <= max_kb * 1024:
                     return d, scale_used * scale_try, q2, len(d)
             
-            # Ultimate fallback: paksa dengan quality terendah
-            smallest = resize_to_scale(img_recompress, 0.5, do_sharpen, sharpen_amount)
+            # Ultimate fallback: paksa dengan quality terendah + scale sangat kecil
+            for final_scale in [0.45, 0.4, 0.35, 0.3]:
+                smallest = resize_to_scale(img_recompress, final_scale, do_sharpen, sharpen_amount)
+                d = save_jpg_bytes(smallest, MIN_QUALITY)
+                if len(d) <= max_kb * 1024:
+                    return d, scale_used * final_scale, MIN_QUALITY, len(d)
+            
+            # SUPER ULTIMATE fallback
+            smallest = resize_to_scale(img_recompress, 0.3, do_sharpen, sharpen_amount)
             d = save_jpg_bytes(smallest, MIN_QUALITY)
-            return d, scale_used * 0.5, MIN_QUALITY, len(d)
+            return d, scale_used * 0.3, MIN_QUALITY, len(d)
         except Exception:
             pass
     
@@ -420,4 +465,4 @@ if run:
         mime="application/zip",
     )
 
-    st.success("Selesai! Master ZIP siap diunduh (q/w/e ≤200KB, lainnya ≤120KB).")
+    st.success("Selesai! Master ZIP siap diunduh (q/w/e ≤198KB, lainnya ≤138KB).")
