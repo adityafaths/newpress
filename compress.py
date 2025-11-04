@@ -113,10 +113,18 @@ def resize_to_scale(img: Image.Image, scale: float, do_sharpen=True, amount=1.0)
     return maybe_sharpen(out, do_sharpen, amount)
 
 def ensure_min_side(img: Image.Image, min_side_px: int, do_sharpen=True, amount=1.0) -> Image.Image:
+    """
+    ✅ TIDAK ADA UPSCALING: Hanya resize jika gambar terlalu kecil dari minimum
+    """
     w, h = img.size
+    # Jika sudah memenuhi minimum, kembalikan tanpa perubahan
     if min(w, h) >= min_side_px:
         return img
-    scale = max(min_side_px / max(min(w, h), 1), 1.0)
+    # Hanya resize jika benar-benar di bawah minimum (bukan upscale untuk memperbesar)
+    scale = min_side_px / max(min(w, h), 1)
+    if scale > 1.0:
+        # Jangan upscale, kembalikan original
+        return img
     return resize_to_scale(img, scale, do_sharpen, amount)
 
 def load_image_from_bytes(name: str, raw: bytes) -> Image.Image:
@@ -236,6 +244,9 @@ def process_one_file_entry(relpath: Path, raw_bytes: bytes, input_root_label: st
     skipped: List[Tuple[str, str]] = []
     ext = relpath.suffix.lower()
     
+    # ✅ Normalisasi path: ubah ekstensi ke lowercase (.JPG → .jpg)
+    relpath = Path(relpath.parent, relpath.stem + ext)
+    
     target_kb = get_target_size_for_path(relpath)
     
     try:
@@ -274,13 +285,29 @@ def process_one_file_entry(relpath: Path, raw_bytes: bytes, input_root_label: st
 st.subheader("1) Upload ZIP atau File Lepas")
 allowed_exts_for_uploader = sorted({e.lstrip('.') for e in IMG_EXT.union(PDF_EXT)} | ({"zip"} if ALLOW_ZIP else set()))
 
+# ✅ Initialize session state untuk file uploader
+if 'uploader_key' not in st.session_state:
+    st.session_state.uploader_key = 0
+
 uploaded_files = st.file_uploader(
     "Upload beberapa ZIP (berisi folder/gambar/PDF) dan/atau file lepas (gambar/PDF). Video ditolak otomatis.",
     type=allowed_exts_for_uploader,
     accept_multiple_files=True,
+    key=f"uploader_{st.session_state.uploader_key}"
 )
 
-run = st.button("🚀 Proses & Buat Master ZIP", type="primary", disabled=not uploaded_files)
+# ✅ Tombol untuk menghapus file yang telah diupload
+col1, col2 = st.columns([1, 4])
+with col1:
+    if st.button("🗑️ Hapus Semua File", type="secondary", disabled=not uploaded_files):
+        st.session_state.uploader_key += 1
+        st.rerun()
+
+with col2:
+    run = st.button("🚀 Proses & Buat Master ZIP", type="primary", disabled=not uploaded_files)
+
+if uploaded_files:
+    st.info(f"📂 **{len(uploaded_files)}** file telah diupload")
 
 if run:
     if not uploaded_files:
