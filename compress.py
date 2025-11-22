@@ -37,11 +37,17 @@ with st.sidebar:
     st.markdown("- File **q, w, e** → **≤198 KB**")
     st.markdown("- File lainnya → **≤138 KB**")
 
-# ===== Tunables =====
+# ===== Tunables - OPTIMIZED FOR 8 CORES =====
 MAX_QUALITY = 95
 MIN_QUALITY = 15
 BG_FOR_ALPHA = (255, 255, 255)
-THREADS = min(4, max(2, (os.cpu_count() or 2)))
+
+# ✅ Optimized for AMD EPYC 8 cores
+THREADS = 8  # Use all 8 cores for maximum throughput
+
+# ✅ Memory-aware batch processing
+BATCH_SIZE = 16  # Process files in batches to manage 16GB RAM efficiently
+
 ZIP_COMP_ALGO = zipfile.ZIP_STORED if SPEED_PRESET == "fast" else zipfile.ZIP_DEFLATED
 
 # ✅ Target size berdasarkan nama file
@@ -109,6 +115,7 @@ def try_quality_bs(img: Image.Image, target_kb: int, q_min=MIN_QUALITY, q_max=MA
 def resize_to_scale(img: Image.Image, scale: float, do_sharpen=True, amount=1.0) -> Image.Image:
     w, h = img.size
     nw, nh = max(int(w*scale), 1), max(int(h*scale), 1)
+    # ✅ Use LANCZOS for better quality
     out = img.resize((nw, nh), Image.LANCZOS)
     return maybe_sharpen(out, do_sharpen, amount)
 
@@ -117,13 +124,10 @@ def ensure_min_side(img: Image.Image, min_side_px: int, do_sharpen=True, amount=
     ✅ TIDAK ADA UPSCALING: Hanya resize jika gambar terlalu kecil dari minimum
     """
     w, h = img.size
-    # Jika sudah memenuhi minimum, kembalikan tanpa perubahan
     if min(w, h) >= min_side_px:
         return img
-    # Hanya resize jika benar-benar di bawah minimum (bukan upscale untuk memperbesar)
     scale = min_side_px / max(min(w, h), 1)
     if scale > 1.0:
-        # Jangan upscale, kembalikan original
         return img
     return resize_to_scale(img, scale, do_sharpen, amount)
 
@@ -146,7 +150,7 @@ def compress_into_range(base_img: Image.Image, max_kb: int, min_side_px: int, sc
     if data is not None and len(data) <= max_kb * 1024:
         result = (data, 1.0, q, len(data))
     else:
-        # 2) Binary search untuk scale yang tepat - PAKSA di bawah max_kb
+        # 2) Binary search untuk scale yang tepat
         lo, hi = scale_min, 1.0
         best_pack = None
         max_steps = 8 if SPEED_PRESET == "fast" else 12
@@ -175,7 +179,6 @@ def compress_into_range(base_img: Image.Image, max_kb: int, min_side_px: int, sc
     
     # ✅ FINAL CHECK: Pastikan tidak ada yang lolos di atas max_kb
     if size_b > max_kb * 1024:
-        # Step 1: Turunkan quality
         for q_try in range(q_used - 5, MIN_QUALITY - 1, -5):
             if q_try < MIN_QUALITY:
                 q_try = MIN_QUALITY
@@ -188,7 +191,7 @@ def compress_into_range(base_img: Image.Image, max_kb: int, min_side_px: int, sc
             if q_try == MIN_QUALITY:
                 break
     
-    # ✅ DOUBLE COMPRESS: Jika MASIH lolos, compress 2x
+    # ✅ DOUBLE COMPRESS jika masih lolos
     if size_b > max_kb * 1024:
         try:
             img_recompress = Image.open(io.BytesIO(data))
@@ -244,7 +247,7 @@ def process_one_file_entry(relpath: Path, raw_bytes: bytes, input_root_label: st
     skipped: List[Tuple[str, str]] = []
     ext = relpath.suffix.lower()
     
-    # ✅ Normalisasi path: ubah ekstensi ke lowercase (.JPG → .jpg)
+    # ✅ Normalisasi path
     relpath = Path(relpath.parent, relpath.stem + ext)
     
     target_kb = get_target_size_for_path(relpath)
@@ -285,7 +288,7 @@ def process_one_file_entry(relpath: Path, raw_bytes: bytes, input_root_label: st
 st.subheader("1) Upload ZIP atau File Lepas")
 allowed_exts_for_uploader = sorted({e.lstrip('.') for e in IMG_EXT.union(PDF_EXT)} | ({"zip"} if ALLOW_ZIP else set()))
 
-# ✅ Initialize session state untuk file uploader
+# ✅ Initialize session state
 if 'uploader_key' not in st.session_state:
     st.session_state.uploader_key = 0
 
@@ -296,7 +299,6 @@ uploaded_files = st.file_uploader(
     key=f"uploader_{st.session_state.uploader_key}"
 )
 
-# ✅ Tombol untuk menghapus file yang telah diupload
 col1, col2 = st.columns([1, 4])
 with col1:
     if st.button("🗑️ Hapus Semua File", type="secondary", disabled=not uploaded_files):
@@ -364,6 +366,7 @@ if run:
 
     master_buf = io.BytesIO()
     zip_write_lock = threading.Lock()
+    
     with zipfile.ZipFile(master_buf, "w", compression=ZIP_COMP_ALGO) as master:
         top_folders: Dict[str, str] = {}
         for job in jobs:
@@ -379,21 +382,26 @@ if run:
             return process_one_file_entry(relp, raw, label)
 
         all_tasks = [(job["label"], relp, data) for job in jobs for (relp, data) in job["items"]]
-        total, done = len(all_tasks), 0
+        total = len(all_tasks)
         progress = st.progress(0.0)
-
+        
+        # ✅ Process in batches for better memory management
         with ThreadPoolExecutor(max_workers=THREADS) as ex:
-            futures = [ex.submit(worker, *t) for t in all_tasks]
-            for fut in as_completed(futures):
-                label, prc, skp, outs = fut.result()
-                summary[label].extend(prc)
-                skipped_all[label].extend(skp)
-                if outs:
-                    top = top_folders[label]
-                    for rel_path, data in outs.items():
-                        add_to_master_zip_threadsafe(top, rel_path, data)
-                done += 1
-                progress.progress(min(done / total, 1.0))
+            done = 0
+            for i in range(0, total, BATCH_SIZE):
+                batch = all_tasks[i:i + BATCH_SIZE]
+                futures = [ex.submit(worker, *t) for t in batch]
+                
+                for fut in as_completed(futures):
+                    label, prc, skp, outs = fut.result()
+                    summary[label].extend(prc)
+                    skipped_all[label].extend(skp)
+                    if outs:
+                        top = top_folders[label]
+                        for rel_path, data in outs.items():
+                            add_to_master_zip_threadsafe(top, rel_path, data)
+                    done += 1
+                    progress.progress(min(done / total, 1.0))
 
     master_buf.seek(0)
 
