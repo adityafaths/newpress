@@ -387,29 +387,27 @@ if run:
         progress = st.progress(0.0)
         
         # ✅ Process in batches for better memory management
-
-with ProcessPoolExecutor(max_workers=THREADS) as ex:
-    done = 0
-    for i in range(0, total, BATCH_SIZE):
-        batch = all_tasks[i:i + BATCH_SIZE]
-
-        # Gunakan partial agar setiap worker bisa dipanggil dengan argumen tetap
-        futures = [ex.submit(worker, *t) for t in batch]
-
-        for fut in as_completed(futures):
-            try:
-                label, prc, skp, outs = fut.result()
-                summary[label].extend(prc)
-                skipped_all[label].extend(skp)
-                if outs:
-                    top = top_folders[label]
-                    for rel_path, data in outs.items():
-                        add_to_master_zip_threadsafe(top, rel_path, data)
-            except Exception as e:
-                st.error(f"Worker error: {e}")
-            done += 1
-            progress.progress(min(done / total, 1.0))
-
+        with ThreadPoolExecutor(max_workers=THREADS) as ex:
+            done = 0
+            for i in range(0, total, BATCH_SIZE):
+                batch = all_tasks[i:i + BATCH_SIZE]
+                
+                # Gunakan partial agar setiap worker bisa dipanggil dengan argumen tetap
+                futures = [ex.submit(worker, *t) for t in batch]
+                
+                for fut in as_completed(futures):
+                    try:
+                        label, prc, skp, outs = fut.result()
+                        summary[label].extend(prc)
+                        skipped_all[label].extend(skp)
+                        if outs:
+                            top = top_folders[label]
+                            for rel_path, data in outs.items():
+                                add_to_master_zip_threadsafe(top, rel_path, data)
+                    except Exception as e:
+                        st.error(f"Worker error: {e}")
+                    done += 1
+                    progress.progress(min(done / total, 1.0))
 
     master_buf.seek(0)
 
