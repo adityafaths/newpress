@@ -1,4 +1,5 @@
 import io, os, zipfile, time, threading
+from functools import partial
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Tuple, Dict
@@ -386,7 +387,6 @@ if run:
         progress = st.progress(0.0)
         
         # ✅ Process in batches for better memory management
-       from functools import partial
 
 with ProcessPoolExecutor(max_workers=THREADS) as ex:
     done = 0
